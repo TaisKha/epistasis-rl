@@ -1,3 +1,8 @@
+## dqn абсолютно такой же как в статье
+# без нормализации награды
+# все время один и тот же файл с данными
+# EPISODE_LENGTH=1
+
 import numpy as np
 import gym
 from gym import spaces
@@ -34,7 +39,7 @@ from ignite.contrib.handlers.base_logger import BaseOutputHandler
 from ignite.contrib.handlers.wandb_logger import WandBLogger
 from typing import Any, Callable, List, Optional, Union
 
-EPISODE_LENGTH = 6000
+EPISODE_LENGTH = 1
 
 class OutputHandler(BaseOutputHandler):
 
@@ -242,7 +247,7 @@ def calc_loss_dqn(batch, net, tgt_net, gamma, device="cpu"):
 class EpistasisEnv(gym.Env):
 
     def __init__(self):
-        self.SAMPLE_SIZE = 300 #t1 = t2 = SAMPLE_SIZE
+        self.SAMPLE_SIZE = 600 #t1 = t2 = SAMPLE_SIZE
         self.reset()
         self.action_space = spaces.Box(low=0, high=1, shape=(self.N_SNPS,), dtype=np.uint8)
         self.observation_space = spaces.Box(low=0, high=1, shape=
@@ -275,7 +280,8 @@ class EpistasisEnv(gym.Env):
     def step(self, action):
         snp_ids = self._take_action(action)
         reward = self._count_reward(snp_ids)
-        reward = self.normalize_reward(reward)
+#         без нормализации
+        # reward = self.normalize_reward(reward)
         
         self.current_step += 1
         if self.current_step == EPISODE_LENGTH:
@@ -325,17 +331,18 @@ class EpistasisEnv(gym.Env):
 
   
     def reset(self):
+        
         pops = ["ASW", "CEU", "CEU+TSI", "CHD", "GIH", "JPT+CHB", "LWK", "MEX", "MKK", "TSI"]
         sim_idx = np.random.randint(2500)
         corp_idx = np.random.randint(1, 23)
         pop_idx = np.random.choice(pops)
         
-        filename = f"/home/tskhakharova/epistasis-rl/epigen/sim/{sim_idx}_{corp_idx}_{pop_idx}.json"
+        self.filename = f"/home/tskhakharova/epistasis-rl/epigen/sim/{sim_idx}_{corp_idx}_{pop_idx}.json"
         # filename = f"/home/tskhakharova/epistasis-rl/epigen/sim/5_7_CEU.json"
-        if not os.path.exists(filename):
+        if not os.path.exists(self.filename):
             os.system(f"cd /home/tskhakharova/epistasis-rl/epigen/ && python3 simulate_data.py --sim-ids {sim_idx} --corpus-id {corp_idx} --pop {pop_idx} --inds 5000 --snps 100 --model models/ext_model.ini")
 
-        self.N_IDV, self.N_SNPS = self.establish_phen_gen(filename)
+        self.N_IDV, self.N_SNPS = self.establish_phen_gen(self.filename)
         
         self.obs_phenotypes = None
         one_hot_obs = self._next_observation()
@@ -365,6 +372,106 @@ class EpistasisEnv(gym.Env):
         one_hot_obs = one_hot_obs.movedim(2, 0)
 
         return one_hot_obs
+    
+class FixedEpistasisEnv(gym.Env):
+
+    def __init__(self, sample_size, n_snps, observation_onehot, filename, observation, obs_phenotypes, disease_snps):
+        self.one_hot_obs = observation_onehot
+        self.filename = filename
+        self.obs = observation
+        self.obs_phenotypes = obs_phenotypes
+        self.disease_snps = disease_snps
+        
+        self.SAMPLE_SIZE = sample_size #t1 = t2 = SAMPLE_SIZE
+        self.N_SNPS = n_snps
+        
+        self.action_space = spaces.Box(low=0, high=1, shape=(self.N_SNPS,), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0, high=1, shape=
+                        (3, 2*self.SAMPLE_SIZE, self.N_SNPS), dtype=np.uint8)
+        self.engine = None
+        
+        
+    def normalize_reward(self, current_reward):
+        maximum_env_reward = self._count_reward(self.disease_snps)
+        minimal_reward = 0.5
+        normalized_reward = (current_reward - minimal_reward) / (maximum_env_reward - minimal_reward)
+        if normalized_reward > 1:
+            print("normalized reward > 1: \n normalized reward = ", normalized_reward, "\n current reward = ", current_reward, "\n maximum_env_reward = ", maximum_env_reward )
+            normalized_reward = 0.1
+        return normalized_reward
+
+    
+    def step(self, action):
+        snp_ids = self._take_action(action)
+        reward = self._count_reward(snp_ids)
+#         без нормализации
+        # reward = self.normalize_reward(reward)
+        
+        self.current_step += 1
+        done = self.current_step == EPISODE_LENGTH
+        return self.one_hot_obs, reward, done, {}
+    
+    def _count_reward(self, snp_ids):
+        
+        if set(snp_ids) == set(self.disease_snps):
+            print("Disease snps are found", end=' ')
+            passed = engine.state.metrics['time_passed']
+            print("in %s, after %d episodes "
+                  "and %d iterations!" % (
+                timedelta(seconds=int(passed)),
+                engine.state.episode, engine.state.iteration))
+        
+        all_existing_seq = defaultdict(lambda: {'control' : 0, 'case' : 0})
+        for i, idv in enumerate(self.obs):
+            snp_to_cmp = tuple(idv[snp_id] for snp_id in snp_ids) #tuple of SNP that 
+            if self.obs_phenotypes[i] == 0:
+                all_existing_seq[snp_to_cmp]['control'] += 1
+            else:
+                all_existing_seq[snp_to_cmp]['case'] += 1
+
+        #count reward      
+        TP = 0 #HR case
+        FP = 0 #HR control
+        TN = 0 #LR control
+        FN = 0 #LR case
+
+        for case_control_count in all_existing_seq.values():
+          # if seq is in LR group
+            if case_control_count['case'] <= case_control_count['control']: #вопрос <= или <
+                FN += case_control_count['case']
+                TN += case_control_count['control']
+            else:
+          # if seq is in HR group
+                TP += case_control_count['case']
+                FP += case_control_count['control']
+        R = (FP + TN) / (TP + FN)
+        delta = FP / (TP+0.001)
+        gamma = (TP + FP + TN + FN) / (TP+0.001)
+        CCR = 0.5 * (TP / (TP + FN) + TN / (FP + TN))
+        U = (R - delta)**2 / ((1 + delta) * (gamma - delta - 1 + 0.001))
+        koef = 1
+        if len(snp_ids) > len(self.disease_snps):
+                print("len(snp_ids) > len(self.disease_snps)")
+                koef = 1 / len(snp_ids)
+
+        return koef*(CCR + U)
+
+  
+    def reset(self):
+
+        self.current_step = 0
+        
+        return self.one_hot_obs
+
+    def render(self, mode='human', close=False):
+        pass
+    
+    def _take_action(self, action):
+        chosen_snp_ids = []
+        for i, choice in enumerate(action):
+            if choice == 1:
+                chosen_snp_ids.append(i)
+        return chosen_snp_ids       
     
 class EpsilonTracker:
     def __init__(self, selector: ptan.actions.EpsilonGreedyActionSelector,
@@ -552,10 +659,20 @@ NAME = "dqn_baseline"
 
 if __name__ == "__main__":
     
-    # wandb.init(project='epistasis', entity="taisikus", sync_tensorboard=True)
+    
+    temp_env = EpistasisEnv()
+    
+    fixed_observation_onehot = temp_env.reset()
+    fixed_filename = temp_env.filename
+    fixed_observation = temp_env.obs
+    fixed_obs_phenotypes = temp_env.obs_phenotypes
+    fixed_disease_snps = temp_env.disease_snps
+    fixed_sample_size = temp_env.SAMPLE_SIZE
+    fixed_n_snps = temp_env.N_SNPS
+    
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = EpistasisEnv()
+    env = FixedEpistasisEnv(fixed_observation_onehot, fixed_filename, fixed_observation, fixed_obs_phenotypes, fixed_disease_snps)
     net = DQN(env.observation_space.shape, env.N_SNPS)
     net = nn.DataParallel(net)
     net = net.to(device)
@@ -591,6 +708,8 @@ if __name__ == "__main__":
 
     engine = Engine(process_batch)
     setup_ignite(engine, params, exp_source, NAME, net)
+    
+    env.engine = engine
     
     engine.run(batch_generator(buffer, params.replay_initial,
                                       params.batch_size))

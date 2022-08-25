@@ -33,8 +33,11 @@ from ignite.handlers.timing import Timer
 from ignite.contrib.handlers.base_logger import BaseOutputHandler
 from ignite.contrib.handlers.wandb_logger import WandBLogger
 from typing import Any, Callable, List, Optional, Union
+import matplotlib
+import matplotlib.pyplot as plt
 
 EPISODE_LENGTH = 6000
+
 
 class OutputHandler(BaseOutputHandler):
 
@@ -104,7 +107,6 @@ class EndOfEpisodeHandler:
             engine.state.episode_steps = steps
             engine.state.metrics['reward'] = reward
             engine.state.metrics['steps'] = steps
-            engine.state.metrics['episode_number'] = engine.state.episode
             self._update_smoothed_metrics(engine, reward, steps)
             if self._subsample_end_of_episode is None or engine.state.episode % self._subsample_end_of_episode == 0:
                 engine.fire_event(EpisodeEvents.EPISODE_COMPLETED)
@@ -247,6 +249,8 @@ class EpistasisEnv(gym.Env):
         self.action_space = spaces.Box(low=0, high=1, shape=(self.N_SNPS,), dtype=np.uint8)
         self.observation_space = spaces.Box(low=0, high=1, shape=
                         (3, 2*self.SAMPLE_SIZE, self.N_SNPS), dtype=np.uint8)
+        self.all_rewards = []
+        self.graph_data = []
         
         
     def establish_phen_gen(self, file):
@@ -271,18 +275,27 @@ class EpistasisEnv(gym.Env):
             normalized_reward = 0.1
         return normalized_reward
 
-    
+    def Average(lst):
+        return sum(lst) / len(lst)
     def step(self, action):
         snp_ids = self._take_action(action)
+        
         reward = self._count_reward(snp_ids)
+        
         reward = self.normalize_reward(reward)
+        self.all_rewards.append(reward)
+        self.graph_data.append(Average(self.all_rewards[-100:]))
         
         self.current_step += 1
         if self.current_step == EPISODE_LENGTH:
             done = True
         else:
             done = False  
-        # done = self.current_step == 1
+            
+        if done:
+            plt.plot(self.graph_data)
+            plt.savefig('episodes_graph/books_read.png')
+            
         obs = None if done else self._next_observation()
         return obs, reward, done, {}
     
@@ -441,7 +454,8 @@ def setup_ignite(engine: Engine, params: SimpleNamespace,
     run_avg = RunningAverage(output_transform=lambda v: v['loss'])
     run_avg.attach(engine, "avg_loss")
 
-    metrics = ['reward', 'steps', 'avg_reward', 'episode_number']
+    # metrics = ['reward', 'avg_reward']
+    metrics = ['reward', 'steps', 'avg_reward']
     event = EpisodeEvents.EPISODE_COMPLETED
     handler = OutputHandler(tag="episodes", metric_names=metrics)
     wandb_logger.attach(engine, log_handler=handler, event_name=event)
@@ -459,6 +473,8 @@ def setup_ignite(engine: Engine, params: SimpleNamespace,
 class DQN(nn.Module):
     def __init__(self, input_shape, n_actions):
         super(DQN, self).__init__()
+        
+        # print(input_shape)
 
         self.conv = nn.Sequential(
             nn.Conv2d(input_shape[0], 64, kernel_size=8, stride=4),
@@ -524,7 +540,7 @@ params = SimpleNamespace(**{
         'replay_size': 10 ** 6,
         'replay_initial': 25000,
         'target_net_sync': 10000,
-        'epsilon_frames': 100000,
+        'epsilon_frames': 500000,
         'epsilon_start': 1.0,
         'epsilon_final': 0.1,
         'learning_rate': 0.00025,
